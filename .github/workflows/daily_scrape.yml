@@ -1,0 +1,38 @@
+name: Daily Funda Scraper
+
+on:
+  schedule:
+    # Runs at 08:00 AM UTC every day
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Allows manual trigger via GitHub button
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install curl-cffi beautifulsoup4
+
+      - name: Run Scraper
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        run: python scraper.py
+
+      - name: Commit and Push Updated History
+        run: |
+          git config --global user.name "GitHub Action Bot"
+          git config --global user.email "actions@github.com"
+          git add seen_houses.json
+          git commit -m "Update seen houses log" || exit 0
+          git push
