@@ -1,13 +1,10 @@
-name: Daily Funda Scraper
+name: Manual Funda Alert (Force Send)
 
 on:
-  schedule:
-    # Runs at 08:00 AM UTC every day
-    - cron: '0 8 * * *'
-  workflow_dispatch: # Allows manual trigger via GitHub button
+  workflow_dispatch: # Creates the manual button on GitHub
 
 jobs:
-  scrape:
+  force_scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -22,17 +19,9 @@ jobs:
         run: |
           pip install curl-cffi beautifulsoup4
 
-      - name: Run Scraper
+      - name: Run Scraper (Ignore History)
         env:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-        run: python scraper.py
-
-      - name: Commit and Push Updated History
-        run: |
-          git config --global user.name "GitHub Action Bot"
-          git config --global user.email "actions@github.com"
-          git add seen_houses.json
-          git commit -m "Update seen houses log" || exit 0
-          git push
+        run: python scraper.py --ignore-seen

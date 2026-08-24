@@ -1,6 +1,7 @@
 import os
 import json
 import smtplib
+import sys
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
@@ -70,19 +71,27 @@ def send_email(new_houses):
         server.sendmail(sender, recipient, msg.as_string())
 
 if __name__ == "__main__":
+    # Check if --ignore-seen flag was passed from command line
+    ignore_seen = "--ignore-seen" in sys.argv
+
     seen = get_seen_houses()
     listings = scrape_funda()
-    
-    # Filter for brand-new listings
-    fresh_houses = [h for h in listings if h["url"] not in seen]
+
+    if ignore_seen:
+        print("Manual run triggered: ignoring history file and sending all current listings.")
+        fresh_houses = listings
+    else:
+        # Filter for brand-new listings only
+        fresh_houses = [h for h in listings if h["url"] not in seen]
 
     if fresh_houses:
-        print(f"Found {len(fresh_houses)} new houses. Sending email...")
+        print(f"Found {len(fresh_houses)} houses to send. Sending email...")
         send_email(fresh_houses)
-        
-        # Update seen list
-        for h in fresh_houses:
-            seen.add(h["url"])
-        save_seen_houses(seen)
+
+        # Only update the history file during normal scheduled runs
+        if not ignore_seen:
+            for h in fresh_houses:
+                seen.add(h["url"])
+            save_seen_houses(seen)
     else:
-        print("No new listings today.")
+        print("No listings found to send.")
