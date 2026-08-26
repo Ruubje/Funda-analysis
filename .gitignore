@@ -1,0 +1,14 @@
+# Ignore all runtime generated files and outputs
+generated/
+
+# Python Caches & Environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# System & IDE
+.DS_Store
+.vscode/
+.idea/
