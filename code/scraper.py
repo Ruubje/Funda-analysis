@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -9,6 +10,8 @@ from curl_cffi import requests
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GENERATED_DIR = os.path.join(BASE_DIR, "generated")
 RAW_DATA_FILE = os.path.join(GENERATED_DIR, "scraped_houses.json")
+
+MANUAL_URLS = []
 
 TARGET_CITIES = [
     "voorburg",
@@ -38,8 +41,6 @@ FILTERS = {
 def build_city_search_url(city, filters):
     """Builds search URL targeting a single municipality slug using selected_area."""
     base = "https://www.funda.nl/zoeken/koop"
-    
-    # Selected area must be a JSON-encoded array containing the city slug
     params = {"selected_area": json.dumps([city])}
 
     if filters.get("object_type"):
@@ -114,7 +115,7 @@ def extract_house_details(url):
         if nuxt_data.get("energy_label"):
             details["energy_label"] = nuxt_data["energy_label"]
 
-        # 2. Extract Living Area from dl / dt / dd feature tables
+        # 2. Extract Living Area from feature tables
         if details["living_area"] == 0:
             for dt in soup.find_all(["dt", "span", "div"]):
                 text = dt.get_text(strip=True).lower()
@@ -126,7 +127,7 @@ def extract_house_details(url):
                         details["living_area"] = int(match.group(1))
                         break
 
-        # 3. Comprehensive Regex Fallbacks for Living Area
+        # 3. Regex Fallbacks for Living Area
         if details["living_area"] == 0:
             patterns = [
                 r"(\d+)\s*m²\s*(?:wonen|gebruiksoppervlakte)",
@@ -185,61 +186,121 @@ def extract_house_details(url):
     return details
 
 
-def scrape_and_store(filters=None):
+def create_house_entry(url):
+    """Cleans a Funda detail URL and formats its display name."""
+    clean_url = url.split("?")[0].rstrip("/") + "/"
+    url_parts = [p for p in clean_url.split("/") if p and p != "https:" and p != "http:"]
+
+    # Check if we have a standard URL (domain/detail/koop/city/address/id)
+    if "koop" in url_parts and len(url_parts) >= 4:
+        address_idx = url_parts.index("koop") + 2
+        city_idx = url_parts.index("koop") + 1
+        
+        if address_idx < len(url_parts):
+            address_slug = url_parts[address_idx]
+            city_slug = url_parts[city_idx]
+            formatted_title = f"{address_slug.replace('-', ' ').title()}, {city_slug.title()}"
+            return clean_url, {"url": clean_url, "name": formatted_title}
+
+    # Fallback for short URLs (e.g., funda.nl/detail/44481411/): Use listing ID as name
+    listing_id = url_parts[-1]
+    formatted_title = f"Funda Listing #{listing_id}"
+    return clean_url, {"url": clean_url, "name": formatted_title}
+
+
+def load_existing_houses():
+    """Loads existing listings from scraped_houses.json to prevent overwriting."""
+    if os.path.exists(RAW_DATA_FILE):
+        try:
+            with open(RAW_DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Key entries by URL for duplicate checking
+                return {house["url"]: house for house in data if "url" in house}
+        except Exception as e:
+            print(f"Could not load existing dataset: {e}")
+    return {}
+
+
+def scrape_and_store(filters=None, extra_urls=None, skip_search=False):
     os.makedirs(GENERATED_DIR, exist_ok=True)
     active_filters = filters if filters is not None else FILTERS
-    found_houses = {}
 
-    # Scrape listings per target municipality
-    for city in TARGET_CITIES:
-        search_url = build_city_search_url(city, active_filters)
-        print(f"Scraping city [{city}]: {search_url}")
+    # 1. Load existing listings from json so we append instead of overwrite
+    existing_houses = load_existing_houses()
+    new_house_urls = set()
+    found_houses = dict(existing_houses)
 
-        try:
-            response = requests.get(
-                search_url, headers=get_headers(), impersonate="chrome120"
-            )
-            if response.status_code != 200:
-                print(f"Skipping {city}: HTTP {response.status_code}")
-                continue
+    # 2. Process explicit CLI / manual URLs
+    manual_list = extra_urls if extra_urls is not None else MANUAL_URLS
+    if manual_list:
+        print(f"Processing {len(manual_list)} explicit URL(s)...")
+        for raw_url in manual_list:
+            clean_url, house_obj = create_house_entry(raw_url)
+            if clean_url not in found_houses:
+                found_houses[clean_url] = house_obj
+                new_house_urls.add(clean_url)
 
-            soup = BeautifulSoup(response.text, "html.parser")
-            city_count = 0
+    # 3. Scrape target cities (unless explicitly skipped via CLI argument)
+    if not skip_search:
+        for city in TARGET_CITIES:
+            search_url = build_city_search_url(city, active_filters)
+            print(f"Scraping city [{city}]: {search_url}")
 
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if "/detail/koop/" in href:
-                    full_url = href if href.startswith("http") else f"https://www.funda.nl{href}"
-                    clean_url = full_url.split("?")[0]
+            try:
+                response = requests.get(
+                    search_url, headers=get_headers(), impersonate="chrome120"
+                )
+                if response.status_code != 200:
+                    print(f"Skipping {city}: HTTP {response.status_code}")
+                    continue
 
-                    if clean_url not in found_houses:
-                        url_parts = clean_url.rstrip("/").split("/")
-                        address_slug = url_parts[-1] if len(url_parts) > 0 else ""
-                        city_slug = url_parts[-2] if len(url_parts) > 1 else city
+                soup = BeautifulSoup(response.text, "html.parser")
+                city_count = 0
 
-                        formatted_title = f"{address_slug.replace('-', ' ').title()}, {city_slug.title()}"
-                        found_houses[clean_url] = {"url": clean_url, "name": formatted_title}
-                        city_count += 1
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if "/detail/koop/" in href:
+                        full_url = href if href.startswith("http") else f"https://www.funda.nl{href}"
+                        clean_url, house_obj = create_house_entry(full_url)
 
-            print(f"Found {city_count} new listings in {city}.")
-            time.sleep(1.0)  # Gentle rate limit safety delay
-        except Exception as e:
-            print(f"Error scraping city {city}: {e}")
+                        if clean_url not in found_houses:
+                            found_houses[clean_url] = house_obj
+                            new_house_urls.add(clean_url)
+                            city_count += 1
 
-    scraped_results = []
-    print(f"\nTotal unique listings collected: {len(found_houses)}. Extracting house specs...")
+                print(f"Found {city_count} new listings in {city}.")
+                time.sleep(1.0)
+            except Exception as e:
+                print(f"Error scraping city {city}: {e}")
 
-    for clean_url, house in found_houses.items():
-        specs = extract_house_details(clean_url)
-        house.update(specs)
-        scraped_results.append(house)
+    # 4. Extract detailed specifications ONLY for newly added URLs
+    if new_house_urls:
+        print(f"\nExtracting house specs for {len(new_house_urls)} new listing(s)...")
+        for clean_url in new_house_urls:
+            specs = extract_house_details(clean_url)
+            found_houses[clean_url].update(specs)
+    else:
+        print("\nNo new listings to extract specs for.")
 
+    # 5. Save all houses back to JSON
+    scraped_results = list(found_houses.values())
     with open(RAW_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(scraped_results, f, indent=2, ensure_ascii=False)
 
-    print(f"Successfully stored {len(scraped_results)} listings in {RAW_DATA_FILE}.")
+    print(f"Successfully updated {RAW_DATA_FILE}. Total stored listings: {len(scraped_results)}.")
     return scraped_results
 
 
 if __name__ == "__main__":
-    scrape_and_store()
+    parser = argparse.ArgumentParser(description="Scrape Funda property listings.")
+    parser.add_argument(
+        "--url",
+        nargs="+",
+        help="One or more direct Funda detail URLs to scrape and append.",
+    )
+    args = parser.parse_args()
+
+    if args.url:
+        scrape_and_store(extra_urls=args.url, skip_search=True)
+    else:
+        scrape_and_store()
